@@ -3,6 +3,7 @@
 NOW=$(date +%FT%TZ)
 BASEURL="https://blacklist.comlot.ch/"
 USERAGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36"
+SHA1_FILE="/root/comlot.sha1"
 MIRROR_DIR="/tmp/mirror"
 CHECK_DIR="/tmp/check"
 GIT_ORIGIN="git@github.com:antoinet/comlot.git"
@@ -10,7 +11,22 @@ GIT_USERNAME="comlot bot"
 GIT_EMAIL="comlot@schoggi.org"
 GIT_STAT_FILE="/tmp/comlot_diff_stat.txt"
 
-function mirror_changes() {
+function check_changes() {
+  # checks whether contents of blacklist.comlot.ch has changed
+  echo "[*] check changes on blacklist.comlot.ch" 
+  s1=`/usr/bin/curl -s https://blacklist.comlot.ch | /usr/bin/sha1sum | /usr/bin/cut -f1 -d" "`
+  s2=`cat $SHA1_FILE`
+  if [ "$s1" != "$s2" ]; then
+  	echo "$s1" > "$SHA1_FILE"
+  	/usr/sbin/ssmtp antoine@schoggi.org < /root/comlot.msg
+  else
+	echo "  no changes"
+	return 1
+  fi
+}
+
+function clone_repository() {
+  echo "[*] clone repository"
   rm -rf "$MIRROR_DIR"
   mkdir -p "$MIRROR_DIR" && cd "$MIRROR_DIR"
   git init -q .
@@ -18,63 +34,78 @@ function mirror_changes() {
   git config user.email "$GIT_EMAIL"
   git remote add origin "$GIT_ORIGIN"
   git pull -q origin master
+}
+
+function download_changes() {
+  echo "[*] download changes"
+  cd "$MIRROR_DIR"
   rm -rf *
   wget -q --mirror --no-parent --no-directories --user-agent="$USERAGENT" "$BASEURL"
   rm index.html
+}
+
+function push_changes() {
+  echo "[*] push changes"
   if [[ `git status --porcelain` ]]; then
     git diff --stat comlot_blacklist.txt > "GIT_STAT_FILE"
     git add .
     git commit -q -m "automatic commit $NOW"
     git push -q origin master
+  else
+    echo "  no changes pushed"
   fi
 }
 
-function check_signatures() {
-  mkdir -p "$CHECK_DIR" && cd "$CHECK_DIR"
-
-  # blacklist file
-  wget -q --user-agent="$USERAGENT" -O blacklist.txt "$BASEURL/comlot_blacklist.txt"
-  # signature
-  wget -q --user-agent="$USERAGENT" -O blacklist.txt.sign "$BASEURL/comlot_blacklist.txt.sign"
-  # comlot certificate
-  wget -q --user-agent="$USERAGENT" -O blacklist.comlot.ch.pub "$BASEURL/blacklist.comlot.ch.pub"
-  # intermediate
-  wget -q --user-agent="$USERAGENT" -O intermediate.pem "$BASEURL/intermediate.pem"
-  # root
-  wget -q --user-agent="$USERAGENT" -O ca.pem "$BASEURL/ca.pem"
-
-  # Ensure the file was signed using blacklist.comlot.ch.pub
-  openssl base64 -d -in blacklist.txt.sign -out blacklist.txt.der
-  openssl dgst -sha256 -verify blacklist.comlot.ch.pub -signature blacklist.txt.der blacklist.txt
+function check_blacklist_signature() {
+  echo "[*] check blacklist signature"
+  cd "$MIRROR_DIR"
+  openssl base64 -d -in comlot_blacklist.txt.sign -out comlot_blacklist.txt.sign.der
+  openssl dgst -sha256 -verify blacklist.comlot.ch.pub -signature comlot_blacklist.txt.sign.der comlot_blacklist.txt
   if [ $? -ne 0 ]; then
+    echo "blacklist signature verification failed" >&2
     return 1
   fi
+}
 
-  # Verify certificate chain
+function check_pubkey_signature() {
+  echo "[*] check pubkey signature"
+  cd "$MIRROR_DIR"
   cat ca.pem intermediate.pem > chain.pem
   openssl verify -CAfile chain.pem blacklist.comlot.ch.pub
   if [ $? -ne 0 ]; then
-    return 2
+    echo "certificate chain verification failed" >&2
+    return 1
   fi
+}
 
-  # Verify the certificates downloaded from blacklist.comlot.ch are issued by SwissSign
-  ## Intermediate SwissSign
+function check_intermediate_signature() {
+  echo "[*] check intermediate signature"j
+  cd "$MIRROR_DIR"
   keyid=`openssl x509 -in blacklist.comlot.ch.pub -text -noout | grep -A1 "X509v3 Authority Key Identifier" | tail -1 | sed 's/.*keyid:\(.*\)$/\1/' | sed 's/://g'`
   wget -q -O chain-from-swisssign.der http://swisssign.net/cgi-bin/authority/download/$keyid
   openssl x509 -inform der -in chain-from-swisssign.der -out chain-from-swisssign.crt
   diff intermediate.pem chain-from-swisssign.crt
   if [ $? -ne 0 ]; then
-    return 3;
+    echo "intermediate certificate validation failed" >&2
+    return 1;
   fi
+}
 
+function check_root_signature() {
+  echo "[*] check root signature"
+  cd "$MIRROR_DIR"
   ## Root SwissSign
   wget -q -O ca-from-swisssign.der http://swisssign.net/cgi-bin/authority/download/50AFCC078715476F38C5B465D1DE95AAE9DF9CCC
   openssl x509 -inform der -in ca-from-swisssign.der -out ca-from-swisssign.crt
   diff ca.pem ca-from-swisssign.crt
   if [ $? -ne 0 ]; then
-    return 4;
+    echo "root certificate mismatch" >&2
+    return 1;
   fi
+}
 
+function check_certificate_revocation() {
+  echo "[*] check certificate revocations"
   # Check that the certificate has not been revoked
   url=`openssl x509 -noout -text -in blacklist.comlot.ch.pub | grep -A 4 'X509v3 CRL Distribution Points' | grep URI | awk -FURI: '{ print $2}'`
   wget -q -O revocation.der "$url"
@@ -82,10 +113,17 @@ function check_signatures() {
   cat intermediate.pem ca.pem revocation.pem > chain.pem
   openssl verify -crl_check -CAfile chain.pem blacklist.comlot.ch.pub
   if [ $? -ne 0 ]; then
-    return 5;
+    echo "certificate validation failed, revoked" >&2
+    return 1;
   fi
 }
 
-
-mirror_changes
-check_signatures
+check_changes && \
+clone_repository && \
+download_changes && \
+push_changes && \
+check_blacklist_signature && \
+check_pubkey_signature && \
+check_intermediate_signature && \
+check_root_signature && \
+check_certificate_revocation
