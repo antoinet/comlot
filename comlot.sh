@@ -23,7 +23,7 @@ function check_changes() {
   	/usr/sbin/ssmtp "$EMAIL_RCPT" < "$EMAIL_TEMPL"
   else
 	echo "  no changes"
-	return 1
+	exit 0
   fi
 }
 
