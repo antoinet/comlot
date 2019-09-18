@@ -146,6 +146,6 @@ MESSAGE="$MESSAGE"`awk 'NR==2' $GIT_STAT_FILE`"\n"
 MESSAGE="${MESSAGE}\n${SIG_LINE}\n"
 MESSAGE="${MESSAGE}\nhttps://github.com/antoinet/comlot/commits/"
 
-t update "`echo -e $MESSAGE`"
+/usr/local/bin/t update "`echo -e $MESSAGE`"
 echo -e "$MESSAGE"
 
