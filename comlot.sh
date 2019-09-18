@@ -4,12 +4,14 @@ NOW=$(date +%FT%TZ)
 BASEURL="https://blacklist.comlot.ch/"
 USERAGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36"
 SHA1_FILE="/root/comlot.sha1"
+EMAIL_TEMPL="/root/comlot.msg"
+EMAIL_RCPT="antoine@schoggi.org"
 MIRROR_DIR="/tmp/mirror"
-CHECK_DIR="/tmp/check"
 GIT_ORIGIN="git@github.com:antoinet/comlot.git"
 GIT_USERNAME="comlot bot"
 GIT_EMAIL="comlot@schoggi.org"
 GIT_STAT_FILE="/tmp/comlot_diff_stat.txt"
+TWITTER_CREDS="/root/.twitter-keys"
 
 function check_changes() {
   # checks whether contents of blacklist.comlot.ch has changed
@@ -18,7 +20,7 @@ function check_changes() {
   s2=`cat $SHA1_FILE`
   if [ "$s1" != "$s2" ]; then
   	echo "$s1" > "$SHA1_FILE"
-  	/usr/sbin/ssmtp antoine@schoggi.org < /root/comlot.msg
+  	/usr/sbin/ssmtp "$EMAIL_RCPT" < "$EMAIL_TEMPL"
   else
 	echo "  no changes"
 	return 1
@@ -47,7 +49,7 @@ function download_changes() {
 function push_changes() {
   echo "[*] push changes"
   if [[ `git status --porcelain` ]]; then
-    git diff --stat comlot_blacklist.txt > "GIT_STAT_FILE"
+    git diff --stat comlot_blacklist.txt > "$GIT_STAT_FILE"
     git add .
     git commit -q -m "automatic commit $NOW"
     git push -q origin master
@@ -118,6 +120,7 @@ function check_certificate_revocation() {
   fi
 }
 
+
 check_changes && \
 clone_repository && \
 download_changes && \
@@ -127,3 +130,22 @@ check_pubkey_signature && \
 check_intermediate_signature && \
 check_root_signature && \
 check_certificate_revocation
+
+if [ $? -ne 0 ]; then
+  echo "invalid signature" >&2
+  SIG_LINE='signature: \xe2\x9d\x8c'
+else
+  SIG_LINE='signature: \xe2\x9c\x85'
+fi
+
+# create tweet
+#
+MESSAGE="\xf0\x9f\x9a\xa8 blacklist alert \xf0\x9f\x9a\xa8\n\n"
+MESSAGE="$MESSAGE"`awk 'NR==1' $GIT_STAT_FILE`"\n"
+MESSAGE="$MESSAGE"`awk 'NR==2' $GIT_STAT_FILE`"\n"
+MESSAGE="${MESSAGE}\n${SIG_LINE}\n"
+MESSAGE="${MESSAGE}\nhttps://github.com/antoinet/comlot/commits/"
+
+t update "`echo -e $MESSAGE`"
+echo -e "$MESSAGE"
+
